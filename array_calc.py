@@ -2,17 +2,18 @@
 """
 Generic line-array splay angle calculator.
 
-You give it the room (listener rows: horizontal distance + ear height),
-the rig (box count, box vertical coverage angle, bottom-box height),
-and it distributes splay angles so each box covers an equal *share of
-the audience*, which naturally gives:
+You give it the room (a listening area: the distance range from the
+array and ONE listening height that applies to the whole area), the
+rig (box count, box vertical coverage angle, array height), and it
+distributes splay angles so each box covers an equal *share of the
+audience*, which naturally gives:
   - wide splays at the bottom (near field, off-axis listeners),
   - tight splays at the top (far field, on-axis listeners).
 
 Optionally snap results to the fixed splay steps your rig's hardware
 actually supports (e.g. 0 / 2.5 / 5 / 7.5 / 10 degrees).
 
-No dependencies -- plain Python 3. Run:  python3 splay.py
+No dependencies -- plain Python 3. Run:  python3 array_calc.py
 """
 
 import math
@@ -34,16 +35,19 @@ def aim_angle(x, y, x0, y0):
 # ----------------------------------------------------------------------
 
 def compute_splays(boxes, box_coverage, rig_height,
-                   audience_rows, min_splay=0.0, max_splay=None,
+                   area_start, area_end, ear_height,
+                   min_splay=0.0, max_splay=None,
                    snap_steps=None, safety_margin_deg=0.0):
     """
     boxes:            number of boxes in the hang
     box_coverage:     nominal vertical coverage of ONE box (deg), e.g. 10
     rig_height:       height of the ACOUSTIC CENTER of the array (m or ft)
                       -- for a rough job, the bottom box height is fine
-    audience_rows:    list of (distance_from_array, ear_height), sorted
-                      by distance, nearest first. These are the points
-                      you want covered -- front row to back row.
+    area_start:       distance from the array where the listening
+                      area begins (nearest listener)
+    area_end:         distance from the array where the listening
+                      area ends (farthest listener)
+    ear_height:       listening height of the ENTIRE area (m or ft)
     min_splay:        never go below this between boxes (deg)
     max_splay:        never exceed this (default: box_coverage)
     snap_steps:       optional list of allowed splays, e.g. [0, 2.5, 5, 7.5, 10]
@@ -53,40 +57,34 @@ def compute_splays(boxes, box_coverage, rig_height,
         max_splay = box_coverage
     if boxes < 2:
         return {"aims": [0.0], "splays": [], "notes": "Single box: just aim it."}
+    if area_end <= area_start:
+        return {"error": "Listening area end distance must be greater "
+                         "than its start distance. Check your inputs."}
 
-    # Aim angles of the extreme boxes
-    near = audience_rows[0]
-    far = audience_rows[-1]
-    ang_bottom = aim_angle(near[0], near[1], 0.0, rig_height) + safety_margin_deg
-    ang_top = aim_angle(far[0], far[1], 0.0, rig_height)
+    # Aim angles of the extreme boxes (same listening height everywhere)
+    ang_bottom = aim_angle(area_start, ear_height, 0.0, rig_height) + safety_margin_deg
+    ang_top = aim_angle(area_end, ear_height, 0.0, rig_height)
 
     total_arc = ang_bottom - ang_top
     if total_arc <= 0:
-        return {"error": "Far row is HIGHER than near row relative to the "
-                        "array -- the array may not need downward arc. "
+        return {"error": "Listening height is at or above the array "
+                        "height -- the array needs no downward arc. "
                         "Check your inputs."}
 
-    # --- Partition the audience into one zone per inter-box gap ---------
-    # Weight zones by log(distance): the far field gets proportionally
-    # more of the arc in SPL terms, but boxes aimed there need less splay
-    # per box. The standard trick: divide the audience by equal log-distance
+    # --- Partition the listening area into one zone per box -------------
+    # The standard trick: divide the audience by equal log-distance
     # share and aim each box at a zone boundary.
-    d_min = math.log(max(near[0], 0.5))
-    d_max = math.log(far[0])
+    d_min = math.log(max(area_start, 0.5))
+    d_max = math.log(area_end)
     # Boundaries in log-distance space; each box aims at one boundary
     boundaries = []
     for i in range(boxes):
         frac = i / (boxes - 1)
         ld = d_min + frac * (d_max - d_min)
         d = math.exp(ld)
-        # Interpolate ear height linearly across audience rows
-        h = interp_height(audience_rows, d)
-        boundaries.append((d, h))
+        boundaries.append(d)
 
-    aims = []
-    for (d, h) in boundaries:
-        # First box aims at the near row, last at the far row
-        aims.append(aim_angle(d, h, 0.0, rig_height))
+    aims = [aim_angle(d, ear_height, 0.0, rig_height) for d in boundaries]
 
     # Smooth: enforce monotonic (strictly decreasing downward tilt from
     # bottom to top) and clamp so coverage always overlaps enough to sum.
@@ -97,7 +95,13 @@ def compute_splays(boxes, box_coverage, rig_height,
         splays.append(s)
 
     if snap_steps:
-        splays = [min(snap_steps, key=lambda st: abs(st - s)) for s in splays]
+        usable = [st for st in snap_steps if min_splay <= st <= max_splay]
+        if usable:
+            splays = [min(usable, key=lambda st: abs(st - s)) for s in splays]
+        else:
+            return {"error": "All snap steps fall outside "
+                            f"[{min_splay}, {max_splay}] deg -- nothing "
+                            "to snap to. Check your inputs."}
 
     # Recompute cumulative aims from the clamped/snapped splays so the
     # printed aim angles are consistent with the splays you'll actually set.
@@ -114,29 +118,16 @@ def compute_splays(boxes, box_coverage, rig_height,
     }
 
 
-def interp_height(rows, d):
-    """Ear height at horizontal distance d (linear between known rows)."""
-    ds = [r[0] for r in rows]
-    if d <= ds[0]:
-        return rows[0][1]
-    if d >= ds[-1]:
-        return rows[-1][1]
-    for i in range(1, len(rows)):
-        if d <= ds[i]:
-            d0, h0 = rows[i - 1]
-            d1, h1 = rows[i]
-            t = (d - d0) / (d1 - d0)
-            return h0 + t * (h1 - h0)
-    return rows[-1][1]
-
-
 # ----------------------------------------------------------------------
 # Pretty printing
 # ----------------------------------------------------------------------
 
-def report(res, boxes, box_coverage):
+def report(res, boxes):
     if "error" in res:
         print("!! " + res["error"])
+        return
+    if "notes" in res:
+        print(res["notes"])
         return
     print("=" * 62)
     print("SPLAY SHEET  (bottom box first)")
@@ -151,13 +142,6 @@ def report(res, boxes, box_coverage):
     print(f"Bottom box aim: {res['ang_bottom']:.1f}° down")
     print(f"Top box aim:    {res['aims'][-1]:.1f}° down "
           f"(listener geometry asked for {res['requested_top']:.1f}°)")
-    print()
-    print("Sanity checks:")
-    print(f"  * Box vertical coverage: {box_coverage}° -- if any splay")
-    print(f"    is below ~{box_coverage/2:.0f}° you're mostly adding level,")
-    print(f"    not coverage; consider fewer boxes aimed at that zone.")
-    print(f"  * Walk the room: back too dull -> reduce top splays;")
-    print(f"    front too hot -> widen bottom splays or use front fills.")
 
 
 # ----------------------------------------------------------------------
@@ -173,34 +157,28 @@ def main():
                    help="vertical coverage of one box in degrees")
     p.add_argument("-H", "--height", type=float, default=7.0,
                    help="height of array acoustic center above floor (m)")
-    p.add_argument("--rows", type=float, nargs=2, action="append",
-                   metavar=("DIST", "EAR_HEIGHT"),
-                   help="audience row: distance from array + ear height. "
-                        "Repeat for each row, nearest first.")
+    p.add_argument("--near", type=float, default=4.0,
+                   help="distance from array where the listening area "
+                        "starts")
+    p.add_argument("--far", type=float, default=40.0,
+                   help="distance from array where the listening area ends")
+    p.add_argument("--ear", type=float, default=1.5,
+                   help="listening height of the entire area (m)")
     p.add_argument("--steps", type=float, nargs="+",
                    help="allowed splay steps of your rigging, e.g. "
                         "0 2.5 5 7.5 10")
     args = p.parse_args()
 
-    # Default example: flat floor hall, array at stage edge
-    # rows: (distance from array, ear height)
-    audience = args.rows or [
-        (4.0, 1.5),    # front row, standing
-        (10.0, 1.2),   # seated mid-front
-        (20.0, 1.2),
-        (30.0, 1.2),
-        (40.0, 1.5),   # mix position / back standing
-    ]
-    audience.sort(key=lambda r: r[0])
-
     res = compute_splays(
         boxes=args.boxes,
         box_coverage=args.coverage,
         rig_height=args.height,
-        audience_rows=audience,
+        area_start=args.near,
+        area_end=args.far,
+        ear_height=args.ear,
         snap_steps=args.steps,
     )
-    report(res, args.boxes, args.coverage)
+    report(res, args.boxes)
 
 
 if __name__ == "__main__":
