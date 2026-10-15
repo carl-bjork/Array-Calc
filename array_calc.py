@@ -130,11 +130,11 @@ def report(res, boxes):
         print(res["notes"])
         return
     print("=" * 62)
-    print("SPLAY SHEET  (bottom box first)")
+    print("SPLAY SHEET  (top box first -- as the hang sits in the air)")
     print("=" * 62)
     print(f"{'Box':>4} {'Aim (dwn)':>10} {'Splay to box below':>20}")
     print("-" * 62)
-    for i in range(boxes):
+    for i in reversed(range(boxes)):
         aim = res["aims"][i]
         sp = f"{res['splays'][i-1]:.1f} deg" if i > 0 else "  --"
         print(f"{i+1:>4} {aim:>9.1f}° {sp:>20}")
